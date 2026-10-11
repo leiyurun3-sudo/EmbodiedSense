@@ -1,3 +1,4 @@
+from collections import Counter
 from dataclasses import replace
 from pathlib import Path
 
@@ -20,6 +21,33 @@ class RGBDPipeline:
         gap = int(config.max_gap_ms * 1_000_000)
         self.rgb_refs = read_index(self.root, "rgb.txt", gap)
         self.depth_refs = read_index(self.root, "depth.txt", gap)
+
+    def summary(self) -> dict:
+        """Lightweight dataset health summary that never decodes an image.
+
+        Reuses the index reader to report stream sizes, span, anomalies and
+        sync coverage, so a dataset can be sanity-checked before a full
+        (image-decoding) run on costly data.
+        """
+        rgb, depth = self.rgb_refs, self.depth_refs
+        span_ns = rgb[-1].timestamp_ns - rgb[0].timestamp_ns if rgb else 0
+
+        def anomalies(stream):
+            return Counter(f for ref in stream for f in ref.flags)
+
+        pairs = list(associate(rgb, depth, int(self.config.max_delta_ms * 1_000_000)))
+        matched = sum(1 for _, depth_ref in pairs if depth_ref is not None)
+        distinct_depth = len({d.sequence_id for _, d in pairs if d is not None})
+        return {
+            "rgb_frames": len(rgb),
+            "depth_frames": len(depth),
+            "span_ns": span_ns,
+            "rgb_unmatched": len(pairs) - matched,
+            "rgb_anomalies": dict(anomalies(rgb)),
+            "depth_anomalies": dict(anomalies(depth)),
+            "rgb_matched_fraction": matched / len(pairs) if pairs else 0.0,
+            "depth_reuse_count": max(0, matched - distinct_depth),
+        }
 
     def iter_observations(self, limit: int | None = None):
         if limit is not None and limit <= 0:

@@ -29,6 +29,28 @@ class PipelineConfig:
 
 
 def load_config(path: str | Path) -> PipelineConfig:
-    data = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    """Load a pipeline configuration, giving clear errors instead of raw tracebacks.
+
+    A malformed config (empty file, non-mapping root, missing ``camera`` block,
+    or an invalid sub-key) previously surfaced as a cryptic ``AttributeError``,
+    ``TypeError`` or bare ``KeyError`` that named neither the file nor the fix.
+    """
+    location = Path(path)
+    try:
+        text = location.read_text(encoding="utf-8")
+    except OSError as error:
+        raise ValueError(f"cannot read config file {location}: {error}") from error
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError as error:
+        raise ValueError(f"invalid YAML in config file {location}: {error}") from error
+    if data is None:
+        raise ValueError(f"config file {location} is empty")
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"config file {location} must contain a mapping, got {type(data).__name__}"
+        )
+    if "camera" not in data:
+        raise ValueError(f"config file {location} is missing the required 'camera' block")
     camera = CameraCalibration(**data.pop("camera"))
     return PipelineConfig(camera=camera, **data)

@@ -155,6 +155,9 @@ def main():
         "--rerun", action="store_true", help="Save scene.rrd without opening a window"
     )
     execute.add_argument("--ply", action="store_true", help="Also save colored binary PLY frames")
+    inspect = sub.add_parser("summary", help="Sanity-check a dataset index without decoding images")
+    inspect.add_argument("--config", required=True)
+    inspect.add_argument("--data-root", required=True)
     playback = sub.add_parser("replay", help="Replay a self-contained recording")
     playback.add_argument("--recording", required=True)
     playback.add_argument("--speed", type=float, default=0)
@@ -168,6 +171,10 @@ def main():
             print(f"Synthetic fixture: {args.out}")
         elif args.command == "run":
             run(args)
+        elif args.command == "summary":
+            config = load_config(args.config)
+            pipeline = RGBDPipeline(args.data_root, config)
+            print(json.dumps(pipeline.summary(), indent=2))
         elif args.command == "replay":
             viz = None
             if args.rerun_out:

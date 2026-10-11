@@ -125,6 +125,14 @@ def replay(path: str | Path, speed=0.0):
 
 def write_ply(path: Path, points, colors):
     """Binary PLY for standard 3D applications."""
+    points = np.asarray(points)
+    colors = np.asarray(colors)
+    if points.ndim != 2 or points.shape[1] != 3 or not np.isfinite(points).all():
+        raise ValueError("Expected finite Nx3 points")
+    if colors.ndim != 2 or colors.shape[1] != 3:
+        raise ValueError("Expected Nx3 colors")
+    if len(colors) != len(points):
+        raise ValueError("points and colors must have the same length")
     vertices = np.empty(
         len(points),
         dtype=[

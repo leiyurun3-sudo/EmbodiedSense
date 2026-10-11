@@ -23,6 +23,10 @@ class CameraCalibration:
             raise ValueError("Calibration must be finite with positive focal lengths/depth scale")
         if self.width <= 0 or self.height <= 0 or not self.calibration_id or not self.frame_id:
             raise ValueError("Calibration dimensions and identifiers are required")
+        # A principal point (cx, cy) outside the image plane indicates a mis-entered
+        # calibration and would silently skew every projected point cloud.
+        if not 0 <= self.cx <= self.width or not 0 <= self.cy <= self.height:
+            raise ValueError("Principal point (cx, cy) must lie inside the image plane")
         if self.model != "registered_pinhole":
             raise ValueError("MVP supports registered pinhole images only")
 

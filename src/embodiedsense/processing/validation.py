@@ -16,12 +16,15 @@ def validate(rgb: SensorPacket, depth: SensorPacket | None, config: PipelineConf
         invalid = True
     if depth is None:
         flags.append("UNSYNCED")
+        metrics["valid_depth_fraction"] = 0.0
         return QualityReport("MISSING", tuple(dict.fromkeys(flags)), metrics)
     flags.extend(depth.flags)
     if depth.payload is None:
         invalid = True
+        metrics["valid_depth_fraction"] = 0.0
     elif depth.payload.shape != shape or depth.payload.dtype != np.uint16:
         flags.append("DEPTH_FORMAT_OR_SIZE")
+        metrics["valid_depth_fraction"] = 0.0
         invalid = True
         if np.issubdtype(depth.payload.dtype, np.number) and not np.isfinite(depth.payload).all():
             flags.append("NONFINITE_DEPTH")

@@ -44,6 +44,7 @@ cd EmbodiedSense
 uv sync --locked --extra viz
 uv run embodiedsense doctor
 uv run embodiedsense make-fixture --out data/synthetic
+uv run embodiedsense summary --config configs/synthetic.yaml --data-root data/synthetic
 uv run embodiedsense run --config configs/synthetic.yaml --data-root data/synthetic --out outputs/synthetic --rerun --ply
 uv run embodiedsense replay --recording outputs/synthetic --speed 0
 uv run pytest -q
@@ -78,6 +79,7 @@ from embodiedsense.core.config import load_config
 from embodiedsense.core.pipeline import RGBDPipeline
 
 pipeline = RGBDPipeline("data/rgbd_dataset_freiburg1_xyz", load_config("configs/tum_rgbd.yaml"))
+print(pipeline.summary())
 for obs in pipeline.iter_observations(limit=10):
     print(obs.rgb.timestamp_ns, obs.sync_delta_ns, obs.quality.status)
     print(obs.points_m.shape, obs.calibration.frame_id)
@@ -96,6 +98,8 @@ for obs in pipeline.iter_observations(limit=10):
 - 间隔异常不等于已证明丢帧，`TIMESTAMP_GAP` 只报告观测到的间隔。
 - 损坏图像、错误尺寸/格式、无效深度得到明确状态，单个坏帧不终止整个图像处理流。
 - 损坏的索引、缺失标定或无效配置会拒绝启动，并报告具体原因。
+- 主点 (cx, cy) 若超出图像平面会拒绝加载，避免误填的标定静默扭曲点云。
+- `summary` 子命令在不解码图像的情况下核对索引：帧数、跨度、异常计数与同步覆盖率。
 - 无效像素不产生点云；`WARN` 可包含正常的局部深度空洞，不能简单解读为整帧不可用。
 
 这是离线回放原型：匹配可能使用参考帧之后的深度，不能直接当作因果在线同步器。
