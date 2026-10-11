@@ -1,4 +1,4 @@
-﻿# 工具链集成对照表（外部工具实测）
+# 工具链集成对照表（外部工具实测）
 
 > **适用范围：** 本文评估的是**外部工具链**（physlint / embodied-sync / bagx / hflow）的实测行为，**不是本仓库 MVP 1 的实现**。结论用于判断下一步该做什么、不该做什么。
 
@@ -16,7 +16,7 @@
 
 | 工具 | 检出 | 说明 |
 |---|---|---|
-| **physlint 0.3.2** | **0 / 8** | 对"干净数据"与"注入 8 种故障的数据"，18 条规则的状态与消息**逐条完全一致** |
+| **physlint 0.3.2** | **0 / 8**（拆解见 §0.1） | 对"干净数据"与"注入 8 种故障的数据"，18 条规则的状态与消息**逐条完全一致** |
 | **embodied-sync 0.1.3** | **1 / 8**（且是漏报） | 报出 cam_front 缺 1 帧，而注入真值是 **7** 帧 |
 | **bagx 0.6.0** | 未测 | 需要 rosbag2 `.db3`/MCAP 输入，本轮无可用输入 |
 | **hflow 0.2.21** | **无法运行** | Windows 下 `ModuleNotFoundError: No module named 'fcntl'`（Unix 专有），Linux-only |
@@ -27,6 +27,20 @@
 - **MCAP 路径**：`embsync --adapter mcap` 写出的**根本不是 MCAP**，而是一个自称 `embodied_sync.mcap.contract.v0` 的 9.4 万行 JSON 文件 → physlint 报 `invalid MCAP, invalid magic`。
 
 > 这正好是 EmbodiedSense 存在的理由：**每个工具单独看都合格，接起来就漏。** 而这个"接不上"的损失目前没有人测量。
+
+### 0.1 "0/8" 必须拆开看（v1.1 修正）
+
+把"未送达"与"漏检"混为一谈，会**同时高估算法缺陷、低估交接缺陷**。按故障是否真的抵达 physlint 拆解：
+
+| 分类 | 数量 | 具体故障 | 含义 |
+|---|---|---|---|
+| **未送达**（交接丢失） | **5 / 8** | `cam_front` 的 jitter / dropped_frames / burst_stall / duplicate_samples；`cam_wrist` 的 fixed_latency | 导出后的 LeRobot 数据集只含 `actions`/`robot_state`/`tactile` + 4 个记账字段，**相机流一条都没进去、视频文件数为 0**，physlint 从未收到这些故障 |
+| **已送达但未检出**（算法漏检） | **3 / 8** | `robot_state` 的 clock_drift / missing_interval；`tactile` 的 non_monotonic | 数据确实进入了 physlint 的输入，18 条规则仍全部通过 |
+
+证据：`meta/info.json` 的 `features` 仅列出 3 条数值流；数据集目录内 `.mp4` 数量为 **0**；
+而原始 run 有 7 条流（actions / audio / cam_front / cam_wrist / events / robot_state / tactile）。
+
+**因此正确表述是：交接环节丢掉了 5/8 的故障可观测性，工具在真正收到的 3 处上全部漏检。**
 
 ---
 
