@@ -156,6 +156,7 @@ def inspect_lerobot(args):
             "clock_domain": data.clock_domain,
             "timestamp_unit": data.timestamp_unit,
             "units": data.units,
+            "stream_units": data.stream_units,
             "timestamp_range_s": [
                 float(data.timestamp_s.min()),
                 float(data.timestamp_s.max()),
@@ -164,7 +165,16 @@ def inspect_lerobot(args):
             "image_shapes": {key: list(value.shape) for key, value in data.images.items()},
             "video_truncated": data.video_truncated,
             "delivery": [
-                {"key": item.key, "status": item.status, "reason": item.reason}
+                {
+                    "key": item.key,
+                    "status": item.status,
+                    "reason": item.reason,
+                    "delivered_episodes": item.delivered_episodes,
+                    "present_episodes": item.present_episodes,
+                    "read_frames": item.read_frames,
+                    "expected_frames": item.expected_frames,
+                    "inspection_basis": item.inspection_basis,
+                }
                 for item in data.delivery
             ],
         }

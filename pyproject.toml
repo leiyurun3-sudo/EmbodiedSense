@@ -26,6 +26,7 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 100
+extend-exclude = ["EmbodiedSense_Startup"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]

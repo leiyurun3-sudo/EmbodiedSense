@@ -130,6 +130,35 @@ uv run pytest -q
 GitHub Actions 在 Windows 和 Linux 运行合成数据测试，无需下载真实数据或使用 GPU。
 实际本机验证见 [验收记录](docs/verification.md)。
 
+## LeRobot v3 数据读取（阶段 B）
+
+```powershell
+./dev.ps1 sync --locked --extra viz --extra lerobot
+./dev.ps1 run embodiedsense inspect-lerobot --data-root data/pusht --episode 0 --max-frames 3
+```
+
+`LeRobotV3Dataset.read_episode()` 返回图像、数值序列和来源元信息，保持原始流名。
+2026-10-12 复核修复见 [审查与验证记录](docs/codex-review-20261012.md)。
+交付状态的接口语义已收紧：
+
+- `PRESENT`：文件存在，但未解码；清单不能证明所有视频可读。
+- `PARTIAL`：按请求只读了一部分，或解码提前结束；结合 reason 和帧数区分两者。
+- `DELIVERED`：指定 episode 的完整视频已解码，或数值 shape/有限性等契约通过。
+- `NOT_PRESENT`：源文件、列或元数据引用缺失。
+- `UNAVAILABLE`：输入存在，但格式、数值或解码未满足读取契约。
+
+`present_episodes` 与 `delivered_episodes` 分开统计；`read_frames`、`expected_frames`
+与 `inspection_basis` 明确本次验证范围。数值清单按数据文件、episode 分批扫描，
+不再把第一份文件的列结构套到全数据集。单位缺失为 `stream_units[key] = None`。
+坏的可选数值流不输出伪造数组，仍可读取其他流；关键索引或时间损坏会明确拒绝该 episode。
+
+当前只支持已验证的 CFR、一视频帧对一数值行布局；使用顺序解码定位，避免未验证的 seek。
+跳到靠后 episode 需要解码/跳过前缀，尚未实现高性能 PTS/VFR 或多速率视频采样映射。
+PushT 不含深度，不能从此读取器获得米制 3D 点云。TUM 几何链路保持可用。
+
+下一轮主线是统一处理后数据服务（FR-12），不是扩大质检报告数量。
+详见 [DeepSeek 下一轮指令](docs/deepseek-next-instructions.md)。
+
 ## 目录与参考
 
 `core/` 数据契约与流水线；`sensors/` 文件读取和合成样例；

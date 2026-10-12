@@ -3,6 +3,8 @@
 from embodiedsense.adapters.lerobot_v3 import (
     DELIVERED,
     NOT_PRESENT,
+    PARTIAL,
+    PRESENT,
     STREAM_INDEX,
     STREAM_NUMERIC,
     STREAM_VIDEO,
@@ -19,6 +21,8 @@ from embodiedsense.adapters.lerobot_v3 import (
 __all__ = [
     "DELIVERED",
     "NOT_PRESENT",
+    "PARTIAL",
+    "PRESENT",
     "STREAM_INDEX",
     "STREAM_NUMERIC",
     "STREAM_VIDEO",

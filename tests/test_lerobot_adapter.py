@@ -19,6 +19,7 @@ from lerobot_fixture import (
 from embodiedsense.adapters import (
     DELIVERED,
     NOT_PRESENT,
+    PRESENT,
     STREAM_VIDEO,
     LeRobotFormatError,
     LeRobotV3Dataset,
@@ -133,8 +134,8 @@ def test_video_frames_match_episode_offsets(dataset_root):
 
     expected_first = [grey_for_frame(index) for index in range(4)]
     expected_second = [grey_for_frame(index) for index in range(4, 7)]
-    np.testing.assert_allclose([frame.mean() for frame in first], expected_first, atol=24)
-    np.testing.assert_allclose([frame.mean() for frame in second], expected_second, atol=24)
+    np.testing.assert_allclose([frame.mean() for frame in first], expected_first, atol=4)
+    np.testing.assert_allclose([frame.mean() for frame in second], expected_second, atol=4)
 
 
 @needs_video
@@ -151,7 +152,7 @@ def test_decode_video_false_reports_presence_without_decoding(dataset_root):
     data = LeRobotV3Dataset(dataset_root).read_episode(0, decode_video=False)
     assert data.images == {}
     delivered = {item.key: item.status for item in data.delivery}
-    assert delivered[VIDEO_KEY] == DELIVERED
+    assert delivered[VIDEO_KEY] == PRESENT
 
 
 @needs_video
@@ -256,7 +257,7 @@ def test_real_pusht_subset():
     assert sum(record.length for record in dataset.episodes()) == 25650
 
     manifest = {item.key: item for item in dataset.stream_manifest()}
-    assert manifest[VIDEO_KEY].status == DELIVERED
+    assert manifest[VIDEO_KEY].status == PRESENT
     # The real dataset stores the camera stream only as video.
     streams = {descriptor.key: descriptor for descriptor in dataset.streams()}
     assert streams[VIDEO_KEY].in_parquet is False

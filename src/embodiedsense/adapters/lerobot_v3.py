@@ -21,7 +21,8 @@ Format facts recorded from a real dataset (``lerobot/pusht``, v3.0), not assumed
   ``round(from_timestamp * fps)``.
 """
 
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,8 @@ STREAM_NUMERIC = "numeric"
 STREAM_INDEX = "index"
 
 DELIVERED = "DELIVERED"
+PRESENT = "PRESENT"
+PARTIAL = "PARTIAL"
 NOT_PRESENT = "NOT_PRESENT"
 UNAVAILABLE = "UNAVAILABLE"
 
@@ -114,6 +117,10 @@ class StreamDelivery:
     reason: str
     delivered_episodes: int = 0
     total_episodes: int = 0
+    present_episodes: int = 0
+    read_frames: int = 0
+    expected_frames: int = 0
+    inspection_basis: str = "file_presence"
 
 
 @dataclass(frozen=True)
@@ -130,6 +137,7 @@ class EpisodeData:
     clock_domain: str = "episode_relative"
     timestamp_unit: str = "second"
     units: str = "dataset_defined"
+    stream_units: dict[str, str | None] = field(default_factory=dict)
 
     @property
     def frame_count(self) -> int:
@@ -167,6 +175,40 @@ def _names_tuple(spec: dict[str, Any]) -> tuple[str, ...] | None:
     return None
 
 
+def _numeric_array(values, spec: dict[str, Any]) -> np.ndarray:
+    """Validate the declared contract; never fill nulls or invent missing samples."""
+    try:
+        array = np.asarray(values)
+    except (ValueError, TypeError) as error:
+        raise LeRobotFormatError("ragged or unreadable numeric values") from error
+    if array.dtype.kind not in "biuf" or not np.isfinite(array).all():
+        raise LeRobotFormatError("null, nonnumeric or nonfinite values")
+    shape = _shape_tuple(spec)
+    actual = array.shape[1:]
+    if actual != shape and not (shape == (1,) and actual == ()):
+        raise LeRobotFormatError(f"shape {actual} differs from declared {shape}")
+    try:
+        dtype = np.dtype(spec["dtype"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise LeRobotFormatError("unsupported numeric dtype") from error
+    if dtype.kind not in "biuf":
+        raise LeRobotFormatError("unsupported numeric dtype")
+    if dtype.kind in "iu" and array.dtype.kind not in "iu":
+        raise LeRobotFormatError("noninteger values for integer stream")
+    if dtype.kind == "b" and array.dtype.kind != "b":
+        raise LeRobotFormatError("nonboolean values for boolean stream")
+    if dtype.kind in "iu":
+        limits = np.iinfo(dtype)
+        if (array < limits.min).any() or (array > limits.max).any():
+            raise LeRobotFormatError("integer value outside declared dtype range")
+    with np.errstate(over="ignore", invalid="ignore"):
+        array = array.astype(dtype)
+    if not np.isfinite(array).all():
+        raise LeRobotFormatError("value outside declared dtype range")
+    array.setflags(write=False)
+    return array
+
+
 class LeRobotV3Dataset:
     """Read-only view of a LeRobot v3 dataset directory.
 
@@ -188,13 +230,20 @@ class LeRobotV3Dataset:
             raise LeRobotFormatError(f"unreadable dataset metadata: {info_path}") from error
 
         version = str(self.info.get("codebase_version", ""))
-        if not version.startswith("v3"):
+        if re.fullmatch(r"v3\.\d+(?:\.\d+)?", version) is None:
             raise LeRobotFormatError(f"unsupported codebase_version: {version!r} (expected v3.x)")
         features = self.info.get("features")
         if not isinstance(features, dict) or not features:
             raise LeRobotFormatError("dataset metadata declares no features")
         self.features: dict[str, Any] = features
-        self.fps = float(self.info.get("fps", 0.0)) or None
+        if not all(isinstance(spec, dict) for spec in features.values()):
+            raise LeRobotFormatError("feature specifications must be objects")
+        try:
+            self.fps = float(self.info.get("fps", 0.0))
+        except (TypeError, ValueError) as error:
+            raise LeRobotFormatError("dataset fps must be numeric") from error
+        if not np.isfinite(self.fps) or self.fps <= 0:
+            raise LeRobotFormatError("dataset fps must be finite and positive")
         self._episode_files = sorted((self.root / "meta" / "episodes").rglob("*.parquet"))
         if not self._episode_files:
             raise LeRobotFormatError("no episode metadata under meta/episodes")
@@ -216,24 +265,43 @@ class LeRobotV3Dataset:
 
     def data_file_for(self, chunk_index: int, file_index: int) -> Path:
         relative = self._data_template().format(chunk_index=chunk_index, file_index=file_index)
-        return self.root / relative
+        return self._contained_path(relative)
 
     def video_file_for(self, stream_key: str, chunk_index: int, file_index: int) -> Path:
         relative = self._video_template().format(
             video_key=stream_key, chunk_index=chunk_index, file_index=file_index
         )
-        return self.root / relative
+        return self._contained_path(relative)
+
+    def _contained_path(self, relative: str) -> Path:
+        path = (self.root / relative).resolve()
+        if Path(relative).is_absolute() or not path.is_relative_to(self.root):
+            raise LeRobotFormatError("payload path escapes dataset directory")
+        return path
+
+    def _video_fps(self, key: str) -> float:
+        info = self.features[key].get("video_info") or {}
+        if not isinstance(info, dict):
+            raise LeRobotFormatError(f"{key}: video_info must be an object")
+        try:
+            fps = float(info.get("video.fps", self.fps))
+        except (TypeError, ValueError) as error:
+            raise LeRobotFormatError(f"{key}: video fps must be numeric") from error
+        if not np.isfinite(fps) or fps <= 0:
+            raise LeRobotFormatError(f"{key}: video fps must be finite and positive")
+        return fps
 
     def _parquet_columns(self) -> set[str]:
-        """Columns of the first available data parquet, used for presence checks."""
+        """Union across distinct files; this is schema presence, not delivery."""
         pq = _require_pyarrow()
-        for record in self.episodes():
-            if record.data_file.is_file():
+        columns = set()
+        for path in sorted({record.data_file for record in self.episodes()}):
+            if path.is_file():
                 try:
-                    return set(pq.ParquetFile(record.data_file).schema_arrow.names)
+                    columns.update(pq.ParquetFile(path).schema_arrow.names)
                 except (OSError, ValueError):
-                    return set()
-        return set()
+                    continue
+        return columns
 
     def streams(self) -> tuple[StreamDescriptor, ...]:
         """Every declared feature, classified by where its payload lives."""
@@ -300,10 +368,16 @@ class LeRobotV3Dataset:
                 wanted.extend(columns)
             table = pq.read_table(path, columns=sorted(set(wanted)))
             for row in table.to_pylist():
+                for name in REQUIRED_EPISODE_COLUMNS:
+                    value = row[name]
+                    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                        raise LeRobotFormatError(f"invalid episode metadata integer: {name}")
                 slices: dict[str, VideoSlice] = {}
                 for key, columns in video_columns.items():
                     present = {name.split("/")[-1] for name in columns}
                     if not present.issuperset(VIDEO_SLICE_COLUMNS):
+                        continue
+                    if any(row[f"videos/{key}/{name}"] is None for name in VIDEO_SLICE_COLUMNS):
                         continue
                     slices[key] = VideoSlice(
                         stream_key=key,
@@ -332,6 +406,14 @@ class LeRobotV3Dataset:
         if not records:
             raise LeRobotFormatError("episode metadata contains no rows")
         records.sort(key=lambda record: record.episode_index)
+        if len({record.episode_index for record in records}) != len(records):
+            raise LeRobotFormatError("duplicate episode metadata")
+        for record in records:
+            if (
+                record.length <= 0
+                or record.dataset_to_index - record.dataset_from_index != record.length
+            ):
+                raise LeRobotFormatError("episode length and dataset boundaries disagree")
         return tuple(records)
 
     def episodes(self) -> tuple[EpisodeRecord, ...]:
@@ -349,93 +431,160 @@ class LeRobotV3Dataset:
         raise KeyError(f"episode {episode_index} is not in this dataset")
 
     def stream_manifest(self) -> tuple[StreamDelivery, ...]:
-        """Dataset-level check of which declared streams can actually be read.
+        """Scan numeric values in bounded batches; video files are only PRESENT.
 
-        This is the guard against silent stream loss: a video stream that is
-        declared in ``info.json`` but has no file on disk is reported as
-        ``NOT_PRESENT`` rather than disappearing from the output.
+        Complete video delivery requires read_episode decoding, not file existence.
+        No decoded video is retained by this manifest operation.
         """
         records = self.episodes()
-        columns = self._parquet_columns()
         total = len(records)
+        expected = sum(record.length for record in records)
+        numeric_keys = [key for key in self.features if key not in self.video_stream_keys()]
+        counts = {(record.episode_index, key): 0 for record in records for key in numeric_keys}
+        present = {key: set() for key in numeric_keys}
+        pq = _require_pyarrow()
+        for path in sorted({record.data_file for record in records}):
+            if not path.is_file():
+                continue
+            try:
+                parquet = pq.ParquetFile(path)
+                available = set(parquet.schema_arrow.names)
+                keys = [key for key in numeric_keys if key in available]
+                file_episodes = {r.episode_index for r in records if r.data_file == path}
+                for key in keys:
+                    present[key].update(file_episodes)
+                if "episode_index" not in available:
+                    continue
+                for batch in parquet.iter_batches(
+                    batch_size=1024, columns=sorted(set(keys + ["episode_index"]))
+                ):
+                    groups: dict[int, list] = {}
+                    for row in batch.to_pylist():
+                        index = row["episode_index"]
+                        if index in file_episodes:
+                            groups.setdefault(index, []).append(row)
+                    for index, rows in groups.items():
+                        for key in keys:
+                            try:
+                                array = _numeric_array(
+                                    [row[key] for row in rows], self.features[key]
+                                )
+                            except LeRobotFormatError:
+                                continue
+                            counts[index, key] += len(array)
+            except (OSError, ValueError):
+                continue
         deliveries = []
         for key, spec in self.features.items():
             if spec.get("dtype") == STREAM_VIDEO:
                 available = sum(
                     1
                     for record in records
-                    if (slice_ := record.video_slices.get(key)) is not None
-                    and slice_.path.is_file()
+                    if (video_slice := record.video_slices.get(key)) is not None
+                    and video_slice.path.is_file()
                 )
                 if available == total:
-                    status, reason = DELIVERED, "chunk video present for every episode"
+                    status, reason = PRESENT, "video files exist; decoding not verified"
                 elif available == 0:
                     status, reason = NOT_PRESENT, "no chunk video found on disk"
                 else:
-                    status, reason = UNAVAILABLE, f"chunk video present for {available}/{total}"
-            elif key in columns:
-                status, reason = DELIVERED, "column present in data parquet"
+                    status, reason = PARTIAL, f"video files present for {available}/{total}"
+                complete, frames, basis = 0, 0, "file_presence"
             else:
-                status, reason = NOT_PRESENT, "column absent from data parquet"
+                available = len(present[key])
+                complete = sum(counts[r.episode_index, key] == r.length for r in records)
+                frames = sum(counts[r.episode_index, key] for r in records)
+                basis = "numeric_values"
+                if complete == total:
+                    status, reason = DELIVERED, "declared numeric shape and values verified"
+                elif not available:
+                    status, reason = NOT_PRESENT, "column or file absent for every episode"
+                else:
+                    status, reason = UNAVAILABLE, f"complete numeric payload for {complete}/{total}"
             deliveries.append(
                 StreamDelivery(
                     key=key,
                     status=status,
                     reason=reason,
-                    delivered_episodes=available if spec.get("dtype") == STREAM_VIDEO else total,
+                    delivered_episodes=complete,
                     total_episodes=total,
+                    present_episodes=available,
+                    read_frames=frames,
+                    expected_frames=expected,
+                    inspection_basis=basis,
                 )
             )
         return tuple(deliveries)
 
     # ------------------------------------------------------------- read frame
 
-    def _read_numeric(self, record: EpisodeRecord, columns: list[str]) -> dict[str, np.ndarray]:
+    def _read_numeric(self, record: EpisodeRecord, columns: list[str]):
         pq = _require_pyarrow()
         table = pq.read_table(
             record.data_file,
             columns=columns,
             filters=[("episode_index", "==", record.episode_index)],
         )
-        if table.num_rows == 0:
+        if table.num_rows != record.length:
             raise LeRobotFormatError(
-                f"episode {record.episode_index} has no rows in {record.data_file.name}"
+                f"episode {record.episode_index}: {table.num_rows} rows "
+                f"differ from length {record.length}"
             )
         result: dict[str, np.ndarray] = {}
+        problems = {}
         for name in columns:
             column = table.column(name).to_pylist()
-            array = np.asarray(column)
-            if array.ndim > 1 and array.shape[-1] == 1:
-                array = array.reshape(array.shape[0], -1)
-            array.setflags(write=False)
-            result[name] = array
-        return result
+            try:
+                result[name] = _numeric_array(column, self.features[name])
+            except LeRobotFormatError as error:
+                problems[name] = str(error)
+        return result, problems
 
     def _decode_video(
         self, spec: VideoSlice, count: int, max_frames: int | None
     ) -> tuple[np.ndarray, str | None, bool]:
         """Decode at most ``count`` frames, honouring ``max_frames`` as a bound."""
-        fps = self.fps or 0.0
+        fps = self._video_fps(spec.stream_key)
+        empty = np.empty((0, *_shape_tuple(self.features[spec.stream_key])), np.uint8)
+        start = spec.start_frame(fps) if np.isfinite(spec.from_timestamp_s) else -1
+        stop = int(round(spec.to_timestamp_s * fps)) if np.isfinite(spec.to_timestamp_s) else -1
+        if start < 0 or stop - start != count:
+            return empty, "video slice boundaries differ from episode length", False
+        if not np.isclose(spec.to_timestamp_s * fps, stop, atol=1e-3, rtol=0):
+            return empty, "video slice end is not on the CFR frame grid", False
+        if not np.isclose(fps, self.fps, atol=1e-3):
+            return empty, "unequal video/numeric rates need an explicit sampling map", False
+        if not np.isclose(spec.from_timestamp_s * fps, start, atol=1e-3, rtol=0):
+            return empty, "video slice start is not on the CFR frame grid", False
         if not spec.path.is_file():
-            return np.empty((0, 0, 0, 3), np.uint8), "chunk video file not found", False
+            return empty, "chunk video file not found", False
         capture = cv2.VideoCapture(str(spec.path))
         if not capture.isOpened():
-            return np.empty((0, 0, 0, 3), np.uint8), "chunk video could not be opened", False
+            capture.release()
+            return empty, "chunk video could not be opened", False
         try:
-            if fps > 0:
-                capture.set(cv2.CAP_PROP_POS_FRAMES, spec.start_frame(fps))
+            reported_fps = capture.get(cv2.CAP_PROP_FPS)
+            if not np.isfinite(reported_fps) or not np.isclose(reported_fps, fps, atol=1e-3):
+                return empty, "decoder fps differs from declared video fps", False
+            # Sequential ordinal positioning avoids an unchecked GOP/frame seek.
+            # This CFR subset favors correctness over speed; VFR/PTS support is deferred.
+            for _ in range(start):
+                if not capture.grab():
+                    return empty, "video ends before episode slice", False
             wanted = count if max_frames is None else min(count, max_frames)
             frames = []
             for _ in range(wanted):
                 ok, frame = capture.read()
                 if not ok:
                     break
+                if frame.shape != _shape_tuple(self.features[spec.stream_key]):
+                    break
                 frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
         finally:
             capture.release()
         truncated = max_frames is not None and count > max_frames
         if not frames:
-            return np.empty((0, 0, 0, 3), np.uint8), "no frames decoded from chunk video", truncated
+            return empty, "no frames decoded from chunk video", truncated
         stacked = np.stack(frames)
         stacked.setflags(write=False)
         if len(frames) < wanted:
@@ -466,16 +615,28 @@ class LeRobotV3Dataset:
             for key, spec in self.features.items()
             if spec.get("dtype") != STREAM_VIDEO and key in available
         ]
-        if "timestamp" not in wanted:
-            raise LeRobotFormatError("data parquet has no timestamp column")
-        numeric = self._read_numeric(record, sorted(wanted))
+        if not {"timestamp", "frame_index", "episode_index"}.issubset(wanted):
+            raise LeRobotFormatError(
+                "data parquet requires timestamp, frame_index and episode_index"
+            )
+        numeric, problems = self._read_numeric(record, sorted(wanted))
+        if any(key in problems for key in ("timestamp", "frame_index", "episode_index")):
+            raise LeRobotFormatError(f"invalid required index/time stream: {problems}")
 
         timestamp = numeric["timestamp"].astype(np.float64).reshape(-1)
-        frame_index = (
-            numeric["frame_index"].reshape(-1)
-            if "frame_index" in numeric
-            else np.arange(timestamp.shape[0], dtype=np.int64)
-        )
+        frame_index = numeric["frame_index"].reshape(-1)
+        if not np.array_equal(frame_index, np.arange(record.length)):
+            raise LeRobotFormatError("frame_index is missing, repeated or out of source order")
+        if not np.all(np.diff(timestamp) > 0) or timestamp[0] < 0:
+            raise LeRobotFormatError(
+                "episode timestamps must be finite, nonnegative and increasing"
+            )
+        if "index" in numeric and not np.array_equal(
+            numeric["index"].reshape(-1),
+            np.arange(record.dataset_from_index, record.dataset_to_index),
+        ):
+            raise LeRobotFormatError("global index disagrees with episode metadata")
+        timestamp.setflags(write=False)
 
         images: dict[str, np.ndarray] = {}
         deliveries: list[StreamDelivery] = []
@@ -485,17 +646,38 @@ class LeRobotV3Dataset:
                 video_slice = record.video_slices.get(key)
                 if video_slice is None:
                     deliveries.append(
-                        StreamDelivery(key, NOT_PRESENT, "episode metadata has no video slice")
+                        StreamDelivery(
+                            key,
+                            NOT_PRESENT,
+                            "episode metadata has no video slice",
+                            0,
+                            1,
+                            0,
+                            0,
+                            record.length,
+                        )
                     )
                     continue
                 if not decode_video:
-                    status = DELIVERED if video_slice.path.is_file() else NOT_PRESENT
+                    status = PRESENT if video_slice.path.is_file() else NOT_PRESENT
                     reason = (
                         "chunk video present; decoding not requested"
-                        if status == DELIVERED
+                        if status == PRESENT
                         else "chunk video file not found"
                     )
-                    deliveries.append(StreamDelivery(key, status, reason, 1, 1))
+                    deliveries.append(
+                        StreamDelivery(
+                            key,
+                            status,
+                            reason,
+                            0,
+                            1,
+                            int(status == PRESENT),
+                            0,
+                            record.length,
+                            "file_presence",
+                        )
+                    )
                     continue
                 frames, problem, was_truncated = self._decode_video(
                     video_slice, record.length, max_frames
@@ -503,18 +685,72 @@ class LeRobotV3Dataset:
                 truncated = truncated or was_truncated
                 if problem is None or frames.shape[0] > 0:
                     images[key] = frames
-                if problem is None:
+                if problem is None and not was_truncated:
                     deliveries.append(
-                        StreamDelivery(key, DELIVERED, "decoded from chunk video", 1, 1)
+                        StreamDelivery(
+                            key,
+                            DELIVERED,
+                            "decoded complete episode",
+                            1,
+                            1,
+                            1,
+                            len(frames),
+                            record.length,
+                            "decoded_full",
+                        )
                     )
                 else:
-                    status = UNAVAILABLE if frames.shape[0] else NOT_PRESENT
-                    deliveries.append(StreamDelivery(key, status, problem, 0, 1))
+                    status = (
+                        PARTIAL
+                        if frames.shape[0]
+                        else (UNAVAILABLE if video_slice.path.is_file() else NOT_PRESENT)
+                    )
+                    deliveries.append(
+                        StreamDelivery(
+                            key,
+                            status,
+                            problem or "bounded preview; full video not verified",
+                            0,
+                            1,
+                            int(video_slice.path.is_file()),
+                            len(frames),
+                            record.length,
+                            "decoded_prefix",
+                        )
+                    )
             elif key in numeric:
-                deliveries.append(StreamDelivery(key, DELIVERED, "read from data parquet", 1, 1))
+                deliveries.append(
+                    StreamDelivery(
+                        key,
+                        DELIVERED,
+                        "numeric values verified",
+                        1,
+                        1,
+                        1,
+                        record.length,
+                        record.length,
+                        "numeric_values",
+                    )
+                )
+            elif key in problems:
+                deliveries.append(
+                    StreamDelivery(
+                        key, UNAVAILABLE, problems[key], 0, 1, 1, 0, record.length, "numeric_values"
+                    )
+                )
             else:
                 deliveries.append(
-                    StreamDelivery(key, NOT_PRESENT, "column absent from data parquet")
+                    StreamDelivery(
+                        key,
+                        NOT_PRESENT,
+                        "column absent from data parquet",
+                        0,
+                        1,
+                        0,
+                        0,
+                        record.length,
+                        "numeric_values",
+                    )
                 )
 
         return EpisodeData(
@@ -525,6 +761,9 @@ class LeRobotV3Dataset:
             images=images,
             delivery=tuple(deliveries),
             video_truncated=truncated,
+            stream_units={
+                key: spec.get("unit", spec.get("units")) for key, spec in self.features.items()
+            },
         )
 
     # ----------------------------------------------------------------- report
@@ -558,6 +797,10 @@ class LeRobotV3Dataset:
                     "reason": item.reason,
                     "delivered_episodes": item.delivered_episodes,
                     "total_episodes": item.total_episodes,
+                    "present_episodes": item.present_episodes,
+                    "read_frames": item.read_frames,
+                    "expected_frames": item.expected_frames,
+                    "inspection_basis": item.inspection_basis,
                 }
                 for item in self.stream_manifest()
             ],

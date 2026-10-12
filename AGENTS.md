@@ -1,6 +1,9 @@
 # EmbodiedSense contributor instructions
 
-- Current scope is the RGB-D MVP 1; see README and docs/roadmap.md.
+- Current scope includes the RGB-D MVP 1 and LeRobot v3 reader; see README and docs/roadmap.md.
+- Data delivery is a primary output. Findings are a parallel diagnostic output, not a replacement.
+- Source data is read-only; derived data may be written to a new directory with provenance.
+- Distinguish file presence, partial reading and complete delivery. Never synthesize indexes silently.
 - Use commands and APIs. Do not manipulate the user's screen or launch viewers automatically.
 - Prefer project/data/output/environment/cache storage on D: for this Windows machine.
 - Keep the core independent of Rerun, ROS and GPU dependencies.
