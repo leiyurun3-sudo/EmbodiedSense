@@ -5,9 +5,16 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
+import lerobot_fixture
 import numpy as np
 import pytest
-from lerobot_fixture import VIDEO_KEY, build_lerobot_v3, grey_for_frame
+from lerobot_fixture import (
+    VIDEO_KEY,
+    VideoEncoderUnavailable,
+    build_lerobot_v3,
+    grey_for_frame,
+    mp4_encoder_available,
+)
 
 from embodiedsense.adapters import (
     DELIVERED,
@@ -19,10 +26,21 @@ from embodiedsense.adapters import (
 
 REAL_DATASET = Path(__file__).resolve().parents[1] / "data" / "pusht"
 
+# OpenCV builds differ across platforms; tests needing a real chunk video skip
+# instead of failing where no mp4 encoder exists.
+VIDEO_OK = mp4_encoder_available()
+needs_video = pytest.mark.skipif(not VIDEO_OK, reason="OpenCV cannot write mp4 here")
+
 
 @pytest.fixture
 def dataset_root(tmp_path) -> Path:
-    return build_lerobot_v3(tmp_path / "dataset", episode_lengths=(4, 3), fps=5.0, size=16)
+    return build_lerobot_v3(
+        tmp_path / "dataset",
+        episode_lengths=(4, 3),
+        fps=5.0,
+        size=16,
+        write_video=VIDEO_OK,
+    )
 
 
 def _sha256(path: Path) -> str:
@@ -81,6 +99,7 @@ def test_unknown_episode_raises(dataset_root):
 # ------------------------------------------------------------ reading episodes
 
 
+@needs_video
 def test_read_episode_delivers_state_action_and_video(dataset_root):
     dataset = LeRobotV3Dataset(dataset_root)
     data = dataset.read_episode(0)
@@ -105,6 +124,7 @@ def test_episode_timestamps_are_monotonic_and_relative(dataset_root):
     assert data.timestamp_unit == "second"
 
 
+@needs_video
 def test_video_frames_match_episode_offsets(dataset_root):
     """Episode 1 must decode the frames the metadata points at, not frames 0-2."""
     dataset = LeRobotV3Dataset(dataset_root)
@@ -117,6 +137,7 @@ def test_video_frames_match_episode_offsets(dataset_root):
     np.testing.assert_allclose([frame.mean() for frame in second], expected_second, atol=24)
 
 
+@needs_video
 def test_max_frames_bounds_decoded_memory(dataset_root):
     data = LeRobotV3Dataset(dataset_root).read_episode(0, max_frames=2)
     assert data.images[VIDEO_KEY].shape[0] == 2
@@ -125,6 +146,7 @@ def test_max_frames_bounds_decoded_memory(dataset_root):
     assert data.frame_count == 4
 
 
+@needs_video
 def test_decode_video_false_reports_presence_without_decoding(dataset_root):
     data = LeRobotV3Dataset(dataset_root).read_episode(0, decode_video=False)
     assert data.images == {}
@@ -132,6 +154,7 @@ def test_decode_video_false_reports_presence_without_decoding(dataset_root):
     assert delivered[VIDEO_KEY] == DELIVERED
 
 
+@needs_video
 def test_reading_does_not_modify_the_dataset(dataset_root):
     dataset = LeRobotV3Dataset(dataset_root)
     parquet = dataset_root / "data" / "chunk-000" / "file-000.parquet"
@@ -144,8 +167,9 @@ def test_reading_does_not_modify_the_dataset(dataset_root):
 # --------------------------------------------------- missing data is reported
 
 
+@needs_video
 def test_missing_video_is_reported_not_silently_dropped(tmp_path):
-    root = build_lerobot_v3(tmp_path / "dataset")
+    root = build_lerobot_v3(tmp_path / "dataset", write_video=True)
     (root / "videos" / VIDEO_KEY / "chunk-000" / "file-000.mp4").unlink()
 
     dataset = LeRobotV3Dataset(root)
@@ -192,6 +216,31 @@ def test_non_v3_version_is_rejected(tmp_path):
 def test_missing_metadata_is_rejected(tmp_path):
     with pytest.raises(LeRobotFormatError):
         LeRobotV3Dataset(tmp_path / "empty")
+
+
+class _ClosedWriter:
+    """Stands in for an OpenCV writer that this platform cannot open."""
+
+    def isOpened(self) -> bool:
+        return False
+
+    def write(self, frame) -> None:
+        raise AssertionError("write must not be reached when the writer is closed")
+
+    def release(self) -> None:
+        return None
+
+
+def test_platform_without_mp4_encoder_is_detected(monkeypatch, tmp_path):
+    """Where no mp4 encoder exists, the probe reports it and the builder refuses.
+
+    Tests that need a chunk video skip on such a platform, so the suite keeps
+    reporting real failures rather than environment-specific ones.
+    """
+    monkeypatch.setattr(lerobot_fixture.cv2, "VideoWriter", lambda *a, **k: _ClosedWriter())
+    assert mp4_encoder_available() is False
+    with pytest.raises(VideoEncoderUnavailable):
+        build_lerobot_v3(tmp_path / "dataset", write_video=True)
 
 
 # ------------------------------------------------------------- real dataset

@@ -27,6 +27,34 @@ STATE_DIM = 2
 FRAME_GREY_STEP = 10
 
 
+class VideoEncoderUnavailable(RuntimeError):
+    """Raised when this platform's OpenCV cannot write a chunk video."""
+
+
+def mp4_encoder_available(size: int = 8, fps: float = 5.0) -> bool:
+    """Probe whether an mp4 chunk video can be written here.
+
+    OpenCV builds differ across platforms, so tests that need a real video file
+    skip rather than fail when this returns False.
+    """
+    import tempfile
+
+    try:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "probe.mp4"
+            writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (size, size))
+            if not writer.isOpened():
+                writer.release()
+                return False
+            try:
+                writer.write(np.zeros((size, size, 3), np.uint8))
+            finally:
+                writer.release()
+            return path.is_file() and path.stat().st_size > 0
+    except (cv2.error, OSError):
+        return False
+
+
 def _features(size: int, fps: float) -> dict:
     return {
         VIDEO_KEY: {
@@ -206,7 +234,7 @@ def build_lerobot_v3(
             str(video_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (size, size)
         )
         if not writer.isOpened():  # pragma: no cover - environment dependent
-            raise RuntimeError("fixture could not open an mp4 writer for the chunk video")
+            raise VideoEncoderUnavailable("this platform's OpenCV cannot write an mp4 chunk video")
         try:
             for index in range(int(sum(episode_lengths))):
                 grey = grey_for_frame(index)

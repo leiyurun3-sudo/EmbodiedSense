@@ -31,10 +31,16 @@ uv run python scripts/download_lerobot_sample.py
 
 ## 自动验证
 
-- `pytest -q`：**36 项通过**（原 20 项 + 新增 16 项），无失败。
+- `pytest -q`：**37 项通过**（原 20 项 + 新增 17 项），无失败、无跳过。
 - `ruff check .` 与 `ruff format --check .`：通过。
-- 新增测试文件：`tests/test_lerobot_adapter.py`（16 项，其中 1 项针对真实子集，
+- 新增测试文件：`tests/test_lerobot_adapter.py`（17 项，其中 1 项针对真实子集，
   子集不存在时自动跳过）。
+
+**跨平台稳健性：** 依赖视频文件的测试先探测本机 OpenCV 能否写出 mp4
+（`lerobot_fixture.mp4_encoder_available()`）；不能写时这些测试**跳过而非失败**，
+避免 CI 在缺少编码器的平台上产生与环境相关的红灯。
+该守卫本身也有单元测试覆盖（`test_platform_without_mp4_encoder_is_detected`）。
+本机实测编码器可用，因此 17 项全部实际执行，无跳过。
 
 合成 fixture（`tests/lerobot_fixture.py`）构造格式忠实的 v3 数据集，
 且**视频帧的灰度值编码了全局帧号**，因此测试能验证 episode 与视频帧的映射，
