@@ -138,6 +138,39 @@ def run(args):
     )
 
 
+def inspect_lerobot(args):
+    """List a LeRobot v3 dataset's streams/episodes and optionally read one episode."""
+    from embodiedsense.adapters import LeRobotV3Dataset
+
+    dataset = LeRobotV3Dataset(args.data_root)
+    report = dataset.describe()
+    if args.episode is not None:
+        data = dataset.read_episode(
+            args.episode, decode_video=not args.no_video, max_frames=args.max_frames
+        )
+        report["episode"] = {
+            "episode_index": data.record.episode_index,
+            "length": data.record.length,
+            "tasks": list(data.record.tasks),
+            "frames_read": data.frame_count,
+            "clock_domain": data.clock_domain,
+            "timestamp_unit": data.timestamp_unit,
+            "units": data.units,
+            "timestamp_range_s": [
+                float(data.timestamp_s.min()),
+                float(data.timestamp_s.max()),
+            ],
+            "numeric_shapes": {key: list(value.shape) for key, value in data.numeric.items()},
+            "image_shapes": {key: list(value.shape) for key, value in data.images.items()},
+            "video_truncated": data.video_truncated,
+            "delivery": [
+                {"key": item.key, "status": item.status, "reason": item.reason}
+                for item in data.delivery
+            ],
+        }
+    print(json.dumps(report, indent=2, ensure_ascii=False))
+
+
 def main():
     parser = argparse.ArgumentParser(description="EmbodiedSense RGB-D Core")
     parser.add_argument("--version", action="version", version=__version__)
@@ -159,6 +192,16 @@ def main():
     playback.add_argument("--recording", required=True)
     playback.add_argument("--speed", type=float, default=0)
     playback.add_argument("--rerun-out", type=Path)
+    inspect = sub.add_parser(
+        "inspect-lerobot",
+        help="List LeRobot v3 streams/episodes and read one episode",
+    )
+    inspect.add_argument("--data-root", required=True)
+    inspect.add_argument("--episode", type=int, help="Read this episode as well")
+    inspect.add_argument("--max-frames", type=int, help="Bound decoded frames per video stream")
+    inspect.add_argument(
+        "--no-video", action="store_true", help="Report video presence without decoding"
+    )
     args = parser.parse_args()
     try:
         if args.command == "doctor":
@@ -168,6 +211,8 @@ def main():
             print(f"Synthetic fixture: {args.out}")
         elif args.command == "run":
             run(args)
+        elif args.command == "inspect-lerobot":
+            inspect_lerobot(args)
         elif args.command == "replay":
             viz = None
             if args.rerun_out:

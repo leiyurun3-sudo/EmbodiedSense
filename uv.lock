@@ -32,12 +32,16 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+lerobot = [
+    { name = "pyarrow" },
+]
 viz = [
     { name = "rerun-sdk" },
 ]
 
 [package.dev-dependencies]
 dev = [
+    { name = "pyarrow" },
     { name = "pytest" },
     { name = "ruff" },
 ]
@@ -47,13 +51,15 @@ requires-dist = [
     { name = "numpy", specifier = ">=2.1,<3" },
     { name = "opencv-python-headless", specifier = ">=4.10,<5" },
     { name = "psutil", specifier = ">=6,<8" },
+    { name = "pyarrow", marker = "extra == 'lerobot'", specifier = ">=15,<30" },
     { name = "pyyaml", specifier = ">=6,<7" },
     { name = "rerun-sdk", marker = "extra == 'viz'", specifier = ">=0.24,<0.30" },
 ]
-provides-extras = ["viz"]
+provides-extras = ["viz", "lerobot"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "pyarrow", specifier = ">=15,<30" },
     { name = "pytest", specifier = ">=8,<10" },
     { name = "ruff", specifier = ">=0.11,<1" },
 ]
